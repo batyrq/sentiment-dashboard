@@ -737,8 +737,22 @@ Return ONLY the JSON object. No other text.`;
   // Find JSON object
   const start = content.indexOf('{');
   const end = content.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('No JSON found in response');
-  return JSON.parse(content.slice(start, end + 1));
+  if (start === -1 || end === -1) {
+    console.error('No JSON found. Raw response:', content);
+    throw new Error('No JSON object found in response. Raw response logged to console.');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(content.slice(start, end + 1));
+  } catch (parseErr) {
+    console.error('JSON parse failed. Raw response:', content);
+    throw new Error(`JSON parse error: ${parseErr.message}\n\nRaw response preview:\n${content.slice(0, 400)}`);
+  }
+  if (!parsed.overall || !Array.isArray(parsed.items)) {
+    console.error('Invalid response structure:', parsed);
+    throw new Error('Invalid response structure — "overall" or "items" array missing. Check console for details.');
+  }
+  return parsed;
 }
 
 // ========== Sentiment color ==========
@@ -1006,19 +1020,21 @@ $('analyzeBtn').addEventListener('click', async () => {
   setLoading('Reading texts');
   await tick();
 
+  let msgTimer = null;
   try {
-    setTimeout(() => setLoading('Analyzing sentiment'), 400);
+    msgTimer = setTimeout(() => setLoading('Analyzing sentiment'), 400);
     const result = await analyzeWithGroq(apiKey, chunks);
+    clearTimeout(msgTimer);
+    msgTimer = null;
 
-    setTimeout(() => setLoading('Building charts'), 100);
+    // Show "Building charts" synchronously, then yield one frame so it paints
+    setLoading('Building charts');
     await tick();
 
     // Attach full text to items
-    if (result.items) {
-      result.items.forEach((item, i) => {
-        item._fullText = chunks[i] || item.text;
-      });
-    }
+    result.items.forEach((item, i) => {
+      item._fullText = chunks[i] || item.text;
+    });
 
     currentData = result;
     endLoading();
@@ -1028,9 +1044,10 @@ $('analyzeBtn').addEventListener('click', async () => {
     saveHistory({
       ts: Date.now(),
       overall: result.overall,
-      count: (result.items || []).length
+      count: result.items.length
     });
   } catch (err) {
+    clearTimeout(msgTimer);
     endLoading();
     $('inputSection').style.display = '';
     showError('Error: ' + err.message);
@@ -1040,12 +1057,28 @@ $('analyzeBtn').addEventListener('click', async () => {
 function tick() { return new Promise(r => setTimeout(r, 16)); }
 
 function showResults(data) {
-  renderOverview(data);
-  setTimeout(() => drawDonut(data.sentiment_distribution || {}), 100);
-  renderEmotionBars(data.emotion_breakdown || {});
-  renderTable(data.items || []);
-  renderKeywords(data.items || []);
-  $('results').classList.add('visible');
+  try {
+    const items = Array.isArray(data.items) ? data.items : [];
+    renderOverview(data);
+    renderEmotionBars(data.emotion_breakdown || {});
+    renderTable(items);
+    renderKeywords(items);
+    $('results').classList.add('visible');
+    // Draw donut after results are visible so canvas has layout dimensions
+    requestAnimationFrame(() => {
+      try {
+        drawDonut(data.sentiment_distribution || {});
+      } catch (chartErr) {
+        console.error('Donut chart error:', chartErr);
+        $('donutLegend').innerHTML = '<span style="color:var(--muted);font-size:0.8rem">Chart unavailable: ' + chartErr.message + '</span>';
+      }
+    });
+  } catch (err) {
+    console.error('showResults error:', err);
+    endLoading();
+    $('inputSection').style.display = '';
+    showError('Error rendering results: ' + err.message);
+  }
 }
 
 // ========== Reset ==========
